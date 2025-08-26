@@ -9,8 +9,9 @@ import urllib.request
 import io
 import re
 
+
 def get_ffmpeg_path():
-    """PyInstaller 번들/개발 환경 모두에서 ffmpeg.exe 경로를 추정."""
+    """PyInstaller 번들/개발 환경 모두에서 ffmpeg.exe 경로 추정"""
     # 1) PyInstaller 번들 임시 폴더
     if hasattr(sys, '_MEIPASS'):
         cand = os.path.join(sys._MEIPASS, "ffmpeg.exe")
@@ -20,8 +21,9 @@ def get_ffmpeg_path():
     cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
     if os.path.isfile(cand):
         return cand
-    # 3) PATH에 있는 ffmpeg (Windows는 그냥 이름으로 호출 가능)
-    return "ffmpeg"  # 존재 여부는 yt-dlp 실행 시 검증됨
+    # 3) PATH 상의 ffmpeg
+    return "ffmpeg"  # 존재 여부는 실행 시 검증
+
 
 class YouTubeDownloaderUI:
     def __init__(self, root):
@@ -34,7 +36,7 @@ class YouTubeDownloaderUI:
         self._download_cancelled = False
         self._current_temp_files = []
 
-        # UI 바인딩 변수
+        # UI 변수
         self.thumbnail_img = None
         self.thumbnail_label = None
         self.url_menu = None
@@ -46,7 +48,7 @@ class YouTubeDownloaderUI:
         self.create_widgets()
 
     def log_message(self, message):
-        """로그 영역에 메시지 추가(스레드-세이프)."""
+        """로그 영역에 메시지 추가"""
         if hasattr(self, 'log_text'):
             self.log_text.insert(tk.END, f"{message}\n")
             self.log_text.see(tk.END)
@@ -93,14 +95,14 @@ class YouTubeDownloaderUI:
         quality_options = [
             ("최고 품질 (병합 필요 - ffmpeg 필요)", "bestvideo+bestaudio"),
             ("최고 품질 (단일 파일)", "best"),
-            ("720p", "best[height<=720]"),
-            ("480p", "best[height<=480]"),
+            ("720p (호환 우선)", "720p"),
+            ("480p (호환 우선)", "480p"),
             ("음성만 (mp3)", "bestaudio/best")
         ]
         for i, (text, value) in enumerate(quality_options):
             ttk.Radiobutton(quality_frame, text=text, variable=self.quality_var, value=value).grid(row=i, column=0, sticky=tk.W, pady=2)
 
-        # 동작 버튼
+        # 버튼들
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
         self.download_button = ttk.Button(button_frame, text="다운로드 시작", command=self.start_download)
@@ -159,7 +161,6 @@ class YouTubeDownloaderUI:
                 video_id = match.group(1)
                 break
         if video_id:
-            # 고해상도 우선 시도 후 실패 시 기본으로
             return f'https://img.youtube.com/vi/{video_id}/hqdefault.jpg'
         return None
 
@@ -217,26 +218,55 @@ class YouTubeDownloaderUI:
         self._download_cancelled = True
         self.log_message("다운로드 중지 요청...")
 
+    def _build_common_opts(self, output_path, ffmpeg_path):
+        opts = {
+            'outtmpl': os.path.join(output_path, '%(uploader)s/%(title)s.%(ext)s'),
+            'progress_hooks': [self.progress_hook],
+            'nocheckcertificate': True,
+            'ignoreerrors': True,
+            'windowsfilenames': True,
+        }
+        if ffmpeg_path:
+            opts['ffmpeg_location'] = ffmpeg_path
+        return opts
+
     def download_video(self, url):
         try:
             output_path = self.path_var.get() or "downloads"
             ffmpeg_path = get_ffmpeg_path()
             quality = self.quality_var.get()
 
-            # 공통 옵션
-            ydl_opts = {
-                'outtmpl': os.path.join(output_path, '%(uploader)s/%(title)s.%(ext)s'),
-                'progress_hooks': [self.progress_hook],
-                'nocheckcertificate': True,
-                'ignoreerrors': True,
-                # 필요한 경우 주석 해제: 'verbose': True,
-            }
+            ydl_opts = self._build_common_opts(output_path, ffmpeg_path)
 
-            # 품질별 포맷
+            # 형식/호환 프리셋 (메신저 호환을 위해 최종 mp4로 재인코딩)
             if quality == "bestvideo+bestaudio":
-                # 비디오+오디오 병합 후 mp4 컨테이너로 출력
-                ydl_opts['format'] = 'bv*+ba/b'
-                ydl_opts['merge_output_format'] = 'mp4'  # ✅ 핵심 수정: 자동 병합/리먹스
+                ydl_opts['format'] = (
+                    "(bv*[vcodec^=avc1]+ba[acodec^=mp4a])/"
+                    "b[ext=mp4]/"
+                    "bv*+ba/b"
+                )
+                ydl_opts['recodevideo'] = 'mp4'
+
+            elif quality == "best":
+                ydl_opts['format'] = "b[ext=mp4]/b"
+                ydl_opts['recodevideo'] = 'mp4'
+
+            elif quality == "720p":
+                ydl_opts['format'] = (
+                    "(bv[height<=720][vcodec^=avc1]+ba[acodec^=mp4a])/"
+                    "b[height<=720][ext=mp4]/"
+                    "b[height<=720]"
+                )
+                ydl_opts['recodevideo'] = 'mp4'
+
+            elif quality == "480p":
+                ydl_opts['format'] = (
+                    "(bv[height<=480][vcodec^=avc1]+ba[acodec^=mp4a])/"
+                    "b[height<=480][ext=mp4]/"
+                    "b[height<=480]"
+                )
+                ydl_opts['recodevideo'] = 'mp4'
+
             elif quality == "bestaudio/best":
                 ydl_opts['format'] = 'bestaudio/best'
                 ydl_opts['postprocessors'] = [{
@@ -244,13 +274,10 @@ class YouTubeDownloaderUI:
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }]
-            else:
-                # 720p, 480p, best(단일)
-                ydl_opts['format'] = quality
 
-            # ffmpeg 경로 지정
-            if ffmpeg_path:
-                ydl_opts['ffmpeg_location'] = ffmpeg_path
+            else:
+                ydl_opts['format'] = quality
+                ydl_opts['recodevideo'] = 'mp4'
 
             # 정보 로깅
             try:
@@ -299,10 +326,12 @@ class YouTubeDownloaderUI:
                 self.progress_var.set("대기 중...")
             self.progress_bar['value'] = 0
 
+
 def main():
     root = tk.Tk()
     app = YouTubeDownloaderUI(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
