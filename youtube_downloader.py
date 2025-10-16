@@ -41,7 +41,9 @@ class YouTubeDownloaderUI:
         self.thumbnail_label = None
         self.url_menu = None
         self.url_var = tk.StringVar()
-        self.path_var = tk.StringVar(value="downloads")
+        # 기본 다운로드 경로를 바탕화면으로 설정
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        self.path_var = tk.StringVar(value=desktop_path)
         self.quality_var = tk.StringVar(value="bestvideo+bestaudio")
         self.progress_var = tk.StringVar(value="대기 중...")
 
@@ -239,33 +241,42 @@ class YouTubeDownloaderUI:
             ydl_opts = self._build_common_opts(output_path, ffmpeg_path)
 
             # 형식/호환 프리셋 (메신저 호환을 위해 최종 mp4로 재인코딩)
+            # 각 옵션 뒤에 fallback 추가하여 어떤 영상이든 다운로드 가능하도록 개선
             if quality == "bestvideo+bestaudio":
                 ydl_opts['format'] = (
                     "(bv*[vcodec^=avc1]+ba[acodec^=mp4a])/"
                     "b[ext=mp4]/"
-                    "bv*+ba/b"
+                    "bv*+ba/"
+                    "b/"
+                    "best"
                 )
-                ydl_opts['recodevideo'] = 'mp4'
+                ydl_opts['merge_output_format'] = 'mp4'
 
             elif quality == "best":
-                ydl_opts['format'] = "b[ext=mp4]/b"
-                ydl_opts['recodevideo'] = 'mp4'
+                ydl_opts['format'] = "b[ext=mp4]/b/best"
+                ydl_opts['merge_output_format'] = 'mp4'
 
             elif quality == "720p":
                 ydl_opts['format'] = (
                     "(bv[height<=720][vcodec^=avc1]+ba[acodec^=mp4a])/"
                     "b[height<=720][ext=mp4]/"
-                    "b[height<=720]"
+                    "bv[height<=720]+ba/"
+                    "b[height<=720]/"
+                    "bv*+ba/"
+                    "best"
                 )
-                ydl_opts['recodevideo'] = 'mp4'
+                ydl_opts['merge_output_format'] = 'mp4'
 
             elif quality == "480p":
                 ydl_opts['format'] = (
                     "(bv[height<=480][vcodec^=avc1]+ba[acodec^=mp4a])/"
                     "b[height<=480][ext=mp4]/"
-                    "b[height<=480]"
+                    "bv[height<=480]+ba/"
+                    "b[height<=480]/"
+                    "bv*+ba/"
+                    "best"
                 )
-                ydl_opts['recodevideo'] = 'mp4'
+                ydl_opts['merge_output_format'] = 'mp4'
 
             elif quality == "bestaudio/best":
                 ydl_opts['format'] = 'bestaudio/best'
@@ -276,18 +287,24 @@ class YouTubeDownloaderUI:
                 }]
 
             else:
-                ydl_opts['format'] = quality
-                ydl_opts['recodevideo'] = 'mp4'
+                ydl_opts['format'] = f"{quality}/best"
+                ydl_opts['merge_output_format'] = 'mp4'
 
             # 정보 로깅
             try:
-                with yt_dlp.YoutubeDL({'quiet': True, 'nocheckcertificate': True}) as ydl:
+                info_opts = {
+                    'quiet': True,
+                    'nocheckcertificate': True,
+                    'no_warnings': True,
+                    'ignoreerrors': True,
+                }
+                with yt_dlp.YoutubeDL(info_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 title = info.get('title', 'Unknown')
                 uploader = info.get('uploader', 'Unknown')
                 self.log_message(f"영상 정보: {title} / {uploader}")
             except Exception as e:
-                self.log_message(f"영상 정보 추출 실패: {e}")
+                self.log_message(f"영상 정보 추출 중 문제 발생 (다운로드는 계속 진행됩니다): {str(e)[:100]}")
 
             # 다운로드 실행
             self.log_message(f"다운로드 시작: {url}")
