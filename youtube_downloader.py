@@ -17,6 +17,16 @@ import multiprocessing
 
 def setup_logging():
     """로깅 설정 초기화"""
+    # 실행 파일 모드에서는 파일 로깅 비활성화
+    if getattr(sys, 'frozen', False):
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler()]
+        )
+        return None
+    
+    # 개발 모드에서는 파일 로깅 활성화
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -34,22 +44,85 @@ def setup_logging():
     return log_filename
 
 
+def get_ytdlp_exe_path():
+    """yt-dlp.exe 경로 반환 (외부 다운로드된 버전 우선)"""
+    # 실행 파일과 같은 폴더에 yt-dlp.exe가 있는지 확인
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        exe_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    ytdlp_exe = os.path.join(exe_dir, "yt-dlp.exe")
+    if os.path.exists(ytdlp_exe):
+        return ytdlp_exe
+    return None
+
+
+def download_latest_ytdlp_exe():
+    """GitHub에서 최신 yt-dlp.exe 다운로드"""
+    try:
+        # 저장 경로 설정
+        if getattr(sys, 'frozen', False):
+            exe_dir = os.path.dirname(sys.executable)
+        else:
+            exe_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        ytdlp_exe_path = os.path.join(exe_dir, "yt-dlp.exe")
+        
+        # GitHub 최신 릴리즈 URL
+        download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        
+        logging.info(f"yt-dlp.exe 다운로드 중... ({download_url})")
+        
+        # 다운로드
+        urllib.request.urlretrieve(download_url, ytdlp_exe_path)
+        
+        logging.info(f"yt-dlp.exe 다운로드 완료: {ytdlp_exe_path}")
+        return ytdlp_exe_path
+    except Exception as e:
+        logging.error(f"yt-dlp.exe 다운로드 실패: {e}")
+        return None
+
+
 def check_and_update_ytdlp():
     """yt-dlp 자동 업데이트 확인 및 실행 (yt-dlp-ejs 플러그인 포함)"""
-    # PyInstaller로 빌드된 실행 파일인 경우 업데이트 건너뛰기
+    # PyInstaller로 빌드된 실행 파일인 경우 외부 yt-dlp.exe 사용
     if getattr(sys, 'frozen', False):
-        logging.info("실행 파일 모드: yt-dlp 업데이트 건너뜀 (내장 버전 사용)")
-        return True
+        logging.info("실행 파일 모드: 외부 yt-dlp.exe 확인 중...")
+        
+        ytdlp_exe = get_ytdlp_exe_path()
+        
+        if ytdlp_exe:
+            # 기존 yt-dlp.exe가 있으면 업데이트 시도
+            try:
+                logging.info("yt-dlp.exe 업데이트 확인 중...")
+                result = subprocess.run(
+                    [ytdlp_exe, "-U"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                logging.info("yt-dlp.exe 업데이트 완료")
+                return True
+            except Exception as e:
+                logging.warning(f"yt-dlp.exe 업데이트 실패, 새로 다운로드 시도: {e}")
+        
+        # yt-dlp.exe가 없거나 업데이트 실패 시 새로 다운로드
+        if download_latest_ytdlp_exe():
+            return True
+        else:
+            logging.warning("외부 yt-dlp.exe 사용 불가, 내장 버전 사용")
+            return True
 
+    # 개발 모드: pip으로 업데이트
     try:
         logging.info("yt-dlp 업데이트 확인 중... (yt-dlp-ejs 플러그인 포함)")
-        # yt-dlp[default]를 설치하면 yt-dlp-ejs 플러그인이 함께 설치됨
-        # 이 플러그인은 유튜브의 SABR 제한을 우회하여 고화질 다운로드를 가능하게 함
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default]"],
             capture_output=True,
             text=True,
-            timeout=60,  # 플러그인 설치에 시간이 더 걸릴 수 있음
+            timeout=60,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
         if "Successfully installed" in result.stdout or "Requirement already satisfied" in result.stdout:
@@ -468,49 +541,118 @@ class YouTubeDownloaderUI:
                 
                 self.log_message("다운로드 준비 중...")
                 
-                # 다운로드 옵션 설정
-                ydl_opts = self._build_common_opts(output_path, ffmpeg_path)
+                # 실행 파일 모드에서는 외부 yt-dlp.exe 사용
+                ytdlp_exe = get_ytdlp_exe_path() if getattr(sys, 'frozen', False) else None
                 
-                # 품질에 따른 포맷 설정
-                # 핵심: 수동 분석 대신 yt-dlp의 강력한 포맷 선택 기능 사용
-                if quality == "bestvideo+bestaudio":
-                    # 1080p MP4 비디오(137) + M4A 오디오(140)를 1차로 시도
-                    # 실패하면 자동으로 최고 화질 선택
-                    ydl_opts['format'] = "137+140/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-                    ydl_opts['merge_output_format'] = 'mp4'
-                    self.log_message("최고 화질(1080p) 다운로드 시도...")
+                if ytdlp_exe and os.path.exists(ytdlp_exe):
+                    # 외부 yt-dlp.exe를 subprocess로 호출
+                    self.log_message("외부 yt-dlp.exe 사용 중...")
                     
-                elif quality == "best":
-                    ydl_opts['format'] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-                    ydl_opts['merge_output_format'] = 'mp4'
+                    # 포맷 설정
+                    if quality == "bestvideo+bestaudio":
+                        format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                    elif quality == "best":
+                        format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                    elif quality == "720p":
+                        format_str = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best"
+                    elif quality == "480p":
+                        format_str = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best"
+                    elif quality == "bestaudio/best":
+                        format_str = "bestaudio[ext=m4a]/bestaudio/best"
+                    else:
+                        format_str = quality
                     
-                elif quality == "720p":
-                    ydl_opts['format'] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]"
-                    ydl_opts['merge_output_format'] = 'mp4'
+                    # 출력 파일 경로
+                    output_template = os.path.join(output_path, "%(title)s.%(ext)s")
                     
-                elif quality == "480p":
-                    ydl_opts['format'] = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]"
-                    ydl_opts['merge_output_format'] = 'mp4'
+                    # yt-dlp.exe 명령어 구성
+                    cmd = [
+                        ytdlp_exe,
+                        "-f", format_str,
+                        "-o", output_template,
+                        "--merge-output-format", "mp4",
+                        "--no-check-certificates",
+                        "--windows-filenames",
+                        url
+                    ]
                     
-                elif quality == "bestaudio/best":
-                    ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
-                    ydl_opts['postprocessors'] = [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }]
+                    if ffmpeg_path:
+                        cmd.extend(["--ffmpeg-location", ffmpeg_path])
+                    
+                    self.log_message(f"다운로드 시작... (포맷: {format_str[:50]}...)")
+                    
+                    # subprocess로 실행
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    )
+                    
+                    # 실시간 출력 처리
+                    for line in process.stdout:
+                        line = line.strip()
+                        if line:
+                            if "[download]" in line and "%" in line:
+                                # 진행률 파싱
+                                try:
+                                    percent = re.search(r'(\d+\.?\d*)%', line)
+                                    if percent:
+                                        self.progress_var.set(f"다운로드 중... {percent.group(1)}%")
+                                except:
+                                    pass
+                            self.log_message(line)
+                    
+                    process.wait()
+                    
+                    if process.returncode == 0 and not self._download_cancelled:
+                        self.log_message("다운로드 및 후처리 완료!")
+                        self.progress_var.set("완료!")
+                        break
+                    elif self._download_cancelled:
+                        self.log_message("다운로드가 중지되었습니다.")
+                        break
                 else:
-                    ydl_opts['format'] = quality
+                    # Python 라이브러리 사용 (개발 모드)
+                    ydl_opts = self._build_common_opts(output_path, ffmpeg_path)
+                    
+                    if quality == "bestvideo+bestaudio":
+                        ydl_opts['format'] = "137+140/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                        ydl_opts['merge_output_format'] = 'mp4'
+                        self.log_message("최고 화질(1080p) 다운로드 시도...")
+                        
+                    elif quality == "best":
+                        ydl_opts['format'] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                        ydl_opts['merge_output_format'] = 'mp4'
+                        
+                    elif quality == "720p":
+                        ydl_opts['format'] = "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]"
+                        ydl_opts['merge_output_format'] = 'mp4'
+                        
+                    elif quality == "480p":
+                        ydl_opts['format'] = "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]"
+                        ydl_opts['merge_output_format'] = 'mp4'
+                        
+                    elif quality == "bestaudio/best":
+                        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                        ydl_opts['postprocessors'] = [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }]
+                    else:
+                        ydl_opts['format'] = quality
 
-                # 다운로드 실행
-                self.log_message(f"다운로드 시작... (포맷: {ydl_opts['format'][:50]}...)")
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+                    self.log_message(f"다운로드 시작... (포맷: {ydl_opts['format'][:50]}...)")
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([url])
 
-                if not self._download_cancelled:
-                    self.log_message("다운로드 및 후처리 완료!")
-                    self.progress_var.set("완료!")
-                    break
+                    if not self._download_cancelled:
+                        self.log_message("다운로드 및 후처리 완료!")
+                        self.progress_var.set("완료!")
+                        break
+
 
             except yt_dlp.utils.DownloadError as e:
                 if "사용자에 의해" in str(e):
