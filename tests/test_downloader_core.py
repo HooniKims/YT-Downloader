@@ -1,4 +1,7 @@
 import os
+import queue
+
+import customtkinter as ctk
 
 from youtube_downloader import (
     APP_TEXT,
@@ -11,6 +14,7 @@ from youtube_downloader import (
     build_download_options,
     compare_versions,
     evaluate_update_status,
+    format_progress_label,
     get_font_path,
     get_ffmpeg_path,
     get_icon_path,
@@ -19,6 +23,25 @@ from youtube_downloader import (
     parse_latest_release,
     run_download_test,
 )
+
+
+class FakeProgressVar:
+    def __init__(self):
+        self.values = []
+
+    def set(self, value):
+        self.values.append(value)
+
+    def get(self):
+        return self.values[-1] if self.values else ""
+
+
+class FakeProgressBar:
+    def __init__(self):
+        self.values = []
+
+    def set(self, value):
+        self.values.append(value)
 
 
 def test_extracts_thumbnail_url_from_short_youtube_link():
@@ -173,3 +196,74 @@ def test_update_status_distinguishes_new_current_and_missing_release():
 def test_release_upload_folder_exists_for_future_update_assets():
     assert os.path.isdir("release_assets")
     assert os.path.isfile(os.path.join("release_assets", "README.md"))
+
+
+def test_progress_hook_queues_ui_updates_instead_of_touching_widgets_directly():
+    app = YouTubeDownloaderUI.__new__(YouTubeDownloaderUI)
+    app._download_cancelled = False
+    app._current_temp_files = []
+    app._last_progress_update = 0
+    app._ui_thread_id = -1
+    app.ui_queue = queue.Queue()
+    app.progress_var = FakeProgressVar()
+    app.progress_bar = FakeProgressBar()
+
+    app.progress_hook(
+        {
+            "status": "downloading",
+            "tmpfilename": "video.part",
+            "downloaded_bytes": 50,
+            "total_bytes": 100,
+            "speed": 1024 * 1024,
+            "eta": 2,
+        }
+    )
+
+    assert app.progress_var.values == []
+    assert app.progress_bar.values == []
+    assert app.ui_queue.qsize() == 1
+    assert app._current_temp_files == ["video.part"]
+
+
+def test_progress_label_includes_percent_and_remaining_time():
+    assert format_progress_label(50, 100, 2) == "\ub2e4\uc6b4\ub85c\ub4dc  50.0% | \ub0a8\uc740 00:02"
+    assert format_progress_label(100, 100, 125) == "\ub2e4\uc6b4\ub85c\ub4dc 100.0% | \ub0a8\uc740 02:05"
+    assert format_progress_label(50, 100, None) == "\ub2e4\uc6b4\ub85c\ub4dc  50.0% | \ub0a8\uc740 --:--"
+
+
+def test_update_worker_queues_result_instead_of_calling_tk_from_thread(monkeypatch):
+    app = YouTubeDownloaderUI.__new__(YouTubeDownloaderUI)
+    app.ui_queue = queue.Queue()
+
+    monkeypatch.setattr(
+        "youtube_downloader.fetch_latest_release",
+        lambda: {"available": True, "version": "1.0.0", "url": GITHUB_RELEASES_PAGE},
+    )
+
+    app._check_for_updates_worker(silent=True)
+
+    callback, args = app.ui_queue.get_nowait()
+    assert callback.__name__ == "_apply_update_status"
+    assert args[0]["state"] == "current"
+    assert args[1] is True
+
+
+def test_common_download_options_use_explicit_quality_without_reading_tk_var(tmp_path):
+    app = YouTubeDownloaderUI.__new__(YouTubeDownloaderUI)
+    app.quality_var = type("ExplodingVar", (), {"get": lambda _self: (_ for _ in ()).throw(RuntimeError("tk access"))})()
+
+    opts = app._build_common_opts(str(tmp_path), "ffmpeg.exe", "720p")
+
+    assert opts["format"] == "bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best"
+
+
+def test_status_label_has_fixed_width_for_stable_progress_layout():
+    root = ctk.CTk()
+    root.withdraw()
+    try:
+        app = YouTubeDownloaderUI(root)
+        root.update()
+
+        assert app.status_label.cget("width") == 300
+    finally:
+        root.destroy()

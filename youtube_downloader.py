@@ -2,11 +2,13 @@ import argparse
 import ctypes
 import io
 import os
+import queue
 import re
 import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+import time
 import urllib.request
 import urllib.error
 import webbrowser
@@ -182,6 +184,17 @@ def evaluate_update_status(release, current_version=APP_VERSION):
     return {"state": "current", "version": latest_version, "url": url}
 
 
+def format_progress_label(downloaded_bytes, total_bytes, eta):
+    percent = downloaded_bytes / total_bytes * 100 if total_bytes else 0
+    if eta is None:
+        remaining = "--:--"
+    else:
+        remaining_seconds = max(int(eta), 0)
+        minutes, seconds = divmod(remaining_seconds, 60)
+        remaining = f"{minutes:02d}:{seconds:02d}"
+    return f"다운로드 {percent:5.1f}% | 남은 {remaining}"
+
+
 def build_download_options(output_path, ffmpeg_path, quality, progress_hook=None):
     opts = {
         "outtmpl": os.path.join(output_path, "%(uploader)s", "%(title)s.%(ext)s"),
@@ -263,6 +276,9 @@ class YouTubeDownloaderUI:
         self.is_downloading = False
         self._download_cancelled = False
         self._current_temp_files = []
+        self._last_progress_update = 0
+        self._ui_thread_id = threading.get_ident()
+        self.ui_queue = queue.Queue()
 
         self.thumbnail_img = None
         self.url_menu = None
@@ -276,6 +292,7 @@ class YouTubeDownloaderUI:
 
         self._build_menu()
         self._build_ui()
+        self.root.after(40, self.process_ui_queue)
         self.root.after(1200, self.check_for_updates_silent)
 
     def font(self, size=14, weight="normal"):
@@ -285,12 +302,42 @@ class YouTubeDownloaderUI:
         return ctk.CTkFont(family="Segoe Script", size=size, weight="bold")
 
     def log_message(self, message):
+        if threading.get_ident() != self._ui_thread_id:
+            self.queue_ui(self.log_message, message)
+            return
         if hasattr(self, "log_text"):
             self.log_text.configure(state="normal")
             self.log_text.insert("end", f"{message}\n")
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
             self.root.update_idletasks()
+
+    def queue_ui(self, callback, *args):
+        self.ui_queue.put((callback, args))
+
+    def process_ui_queue(self):
+        try:
+            for _ in range(80):
+                callback, args = self.ui_queue.get_nowait()
+                callback(*args)
+        except queue.Empty:
+            pass
+        self.root.after(40, self.process_ui_queue)
+
+    def set_progress(self, text=None, value=None):
+        if threading.get_ident() != self._ui_thread_id:
+            self.queue_ui(self.set_progress, text, value)
+            return
+        if text is not None:
+            self.progress_var.set(text)
+        if value is not None:
+            self.progress_bar.set(value)
+
+    def show_error(self, title, message):
+        if threading.get_ident() != self._ui_thread_id:
+            self.queue_ui(self.show_error, title, message)
+            return
+        messagebox.showerror(title, message)
 
     def _build_menu(self):
         menu_bar = tk.Menu(self.root)
@@ -547,6 +594,8 @@ class YouTubeDownloaderUI:
             textvariable=self.progress_var,
             text_color=THEME["text"],
             font=self.font(14, "bold"),
+            width=300,
+            anchor="w",
         )
         self.status_label.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
 
@@ -655,9 +704,9 @@ class YouTubeDownloaderUI:
         try:
             release = fetch_latest_release()
             status = evaluate_update_status(release, APP_VERSION)
-            self.root.after(0, lambda: self._apply_update_status(status, silent))
+            self.queue_ui(self._apply_update_status, status, silent)
         except Exception as exc:
-            self.root.after(0, lambda: self._show_update_error(exc, silent))
+            self.queue_ui(self._show_update_error, exc, silent)
 
     def _apply_update_status(self, status, silent=False):
         self.update_check_in_progress = False
@@ -737,28 +786,24 @@ class YouTubeDownloaderUI:
             raise yt_dlp.utils.DownloadError("사용자가 다운로드를 중지했습니다.")
 
         if d["status"] == "downloading":
+            now = time.monotonic()
+            if now - self._last_progress_update < 0.15:
+                return
+            self._last_progress_update = now
+
             tmpfilename = d.get("tmpfilename")
             if tmpfilename and tmpfilename not in self._current_temp_files:
                 self._current_temp_files.append(tmpfilename)
 
             total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate")
             if total_bytes:
-                percent = d["downloaded_bytes"] / total_bytes * 100
-                speed = d.get("speed")
-                eta = d.get("eta")
-                extra = []
-                if speed:
-                    extra.append(f"{speed / 1024 / 1024:.2f} MB/s")
-                if eta:
-                    extra.append(f"남은 시간 {int(eta)}초")
-                extra_txt = " | " + " / ".join(extra) if extra else ""
-                self.progress_var.set(f"다운로드 중... {percent:.1f}%{extra_txt}")
-                self.progress_bar.set(min(max(percent / 100, 0), 1))
+                downloaded_bytes = d["downloaded_bytes"]
+                percent = downloaded_bytes / total_bytes * 100
+                self.set_progress(format_progress_label(downloaded_bytes, total_bytes, d.get("eta")), min(max(percent / 100, 0), 1))
             else:
-                self.progress_var.set("다운로드 중...")
+                self.set_progress("다운로드 중... | 남은 --:--")
         elif d["status"] == "finished":
-            self.progress_var.set("후처리 중...")
-            self.progress_bar.set(1)
+            self.set_progress("후처리 중...", 1)
 
     def start_download(self):
         url = self.url_var.get().strip()
@@ -771,12 +816,14 @@ class YouTubeDownloaderUI:
         self.is_downloading = True
         self._download_cancelled = False
         self._current_temp_files = []
+        output_path = self.path_var.get() or "downloads"
+        quality = self.quality_var.get()
         self.download_button.configure(state="disabled", text="다운로드 중")
         self.stop_button.configure(state="normal")
         self.progress_bar.set(0)
         self.progress_var.set("다운로드 준비 중...")
 
-        thread = threading.Thread(target=self.download_video, args=(url,), daemon=True)
+        thread = threading.Thread(target=self.download_video, args=(url, output_path, quality), daemon=True)
         thread.start()
 
     def stop_download(self):
@@ -786,14 +833,21 @@ class YouTubeDownloaderUI:
         self.stop_button.configure(state="disabled", text="중지 중")
         self.log_message("다운로드 중지를 요청했습니다...")
 
-    def _build_common_opts(self, output_path, ffmpeg_path):
-        return build_download_options(output_path, ffmpeg_path, self.quality_var.get(), self.progress_hook)
+    def finish_download_ui(self):
+        self.download_button.configure(state="normal", text=APP_TEXT["download_button"])
+        self.stop_button.configure(state="disabled", text=APP_TEXT["stop_button"])
+        if self.progress_var.get() not in ("완료", "다운로드 중지됨"):
+            self.progress_var.set(APP_TEXT["ready"])
+        if self.progress_var.get() != "완료":
+            self.progress_bar.set(0)
 
-    def download_video(self, url):
+    def _build_common_opts(self, output_path, ffmpeg_path, quality):
+        return build_download_options(output_path, ffmpeg_path, quality, self.progress_hook)
+
+    def download_video(self, url, output_path, quality):
         try:
-            output_path = self.path_var.get() or "downloads"
             ffmpeg_path = get_ffmpeg_path()
-            ydl_opts = self._build_common_opts(output_path, ffmpeg_path)
+            ydl_opts = self._build_common_opts(output_path, ffmpeg_path, quality)
 
             try:
                 info_opts = {
@@ -816,19 +870,18 @@ class YouTubeDownloaderUI:
 
             if not self._download_cancelled:
                 self.log_message("다운로드와 후처리가 완료되었습니다.")
-                self.progress_var.set("완료")
-                self.progress_bar.set(1)
+                self.set_progress("완료", 1)
 
         except yt_dlp.utils.DownloadError as exc:
             if "cancel" in str(exc).lower() or "중지" in str(exc):
                 self.log_message("다운로드가 중지되었습니다.")
-                self.progress_var.set("다운로드 중지됨")
+                self.set_progress("다운로드 중지됨")
             else:
                 self.log_message(f"다운로드 오류: {exc}")
-                messagebox.showerror("다운로드 오류", f"오류가 발생했습니다:\n{exc}")
+                self.show_error("다운로드 오류", f"오류가 발생했습니다:\n{exc}")
         except Exception as exc:
             self.log_message(f"예상치 못한 오류: {exc}")
-            messagebox.showerror("예상치 못한 오류", f"예상치 못한 오류가 발생했습니다:\n{exc}")
+            self.show_error("예상치 못한 오류", f"예상치 못한 오류가 발생했습니다:\n{exc}")
         finally:
             if self._download_cancelled:
                 for file_path in self._current_temp_files:
@@ -841,12 +894,7 @@ class YouTubeDownloaderUI:
 
             self.is_downloading = False
             self._download_cancelled = False
-            self.download_button.configure(state="normal", text=APP_TEXT["download_button"])
-            self.stop_button.configure(state="disabled", text=APP_TEXT["stop_button"])
-            if self.progress_var.get() not in ("완료", "다운로드 중지됨"):
-                self.progress_var.set(APP_TEXT["ready"])
-            if self.progress_var.get() != "완료":
-                self.progress_bar.set(0)
+            self.queue_ui(self.finish_download_ui)
 
 
 def main():
