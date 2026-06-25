@@ -1,12 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+
+customtkinter_datas = collect_data_files('customtkinter')
+
 
 a = Analysis(
     ['youtube_downloader.py'],
     pathex=[],
     binaries=[],
-    datas=[('ffmpeg.exe', '.'), ('avcodec-62.dll', '.'), ('avdevice-62.dll', '.'), ('avfilter-11.dll', '.'), ('avformat-62.dll', '.'), ('avutil-60.dll', '.'), ('swresample-6.dll', '.'), ('swscale-9.dll', '.'), ('ffprobe.exe', '.')],
-    hiddenimports=['yt_dlp', 'PIL', 'PIL.Image', 'PIL.ImageTk'],
+    datas=[
+        ('ffmpeg.exe', '.'),
+        ('ffprobe.exe', '.'),
+        ('youricon.ico', '.'),
+        ('fonts/Paperlogy-4Regular.ttf', 'fonts'),
+        ('fonts/Paperlogy-6SemiBold.ttf', 'fonts'),
+    ] + customtkinter_datas,
+    hiddenimports=['yt_dlp', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'customtkinter'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
